@@ -3,7 +3,7 @@ display_name: "TP-Link Kasa"
 description: "TP-Link Kasa/Tapo smart devices — zero-cloud LAN discovery and control for plugs, bulbs, switches, and dimmers."
 version: "1.0.0"
 min_jarvis_version: "0.9.0"
-license: "MIT"
+license: Apache-2.0
 author:
   github: "alexberardi"
 categories: ["smart-home", "lighting"]
