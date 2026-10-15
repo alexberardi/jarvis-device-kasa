@@ -52,6 +52,13 @@ def _slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
+def _entity_id(dev: Any, ip: str) -> str:
+    """Stable id for a device: slug of its alias, else of its MAC, else its IP."""
+    alias: str = getattr(dev, "alias", "") or ""
+    mac: str = getattr(dev, "mac", "") or ""
+    return _slugify(alias) if alias else (_slugify(mac) if mac else ip)
+
+
 class KasaProtocol(IJarvisDeviceProtocol):
     """TP-Link Kasa/Tapo LAN protocol adapter."""
 
@@ -63,24 +70,12 @@ class KasaProtocol(IJarvisDeviceProtocol):
     @property
     def supported_actions(self) -> list[IJarvisButton]:
         return [
-            IJarvisButton(
-                action="turn_on",
-                label="Turn On",
-                icon="power-plug",
-            ),
-            IJarvisButton(
-                action="turn_off",
-                label="Turn Off",
-                icon="power-plug-off",
-            ),
-            IJarvisButton(
-                action="toggle",
-                label="Toggle",
-                icon="toggle-switch",
-            ),
+            IJarvisButton("Turn On", "turn_on", "primary", "power-plug"),
+            IJarvisButton("Turn Off", "turn_off", "secondary", "power-plug-off"),
+            IJarvisButton("Toggle", "toggle", "secondary", "toggle-switch"),
         ]
 
-    async def discover_devices(self, timeout: int = 5) -> list[DiscoveredDevice]:
+    async def discover(self, timeout: float = 5.0) -> list[DiscoveredDevice]:
         try:
             from kasa import Discover
         except ImportError:
@@ -112,18 +107,16 @@ class KasaProtocol(IJarvisDeviceProtocol):
                     domain = dom
                     break
 
-            device_id: str = _slugify(alias) if alias else _slugify(mac)
-
             devices.append(
                 DiscoveredDevice(
-                    id=device_id,
                     name=alias or model or "Kasa Device",
                     domain=domain,
-                    protocol=self.protocol_name,
-                    ip=ip,
-                    mac=mac,
-                    model=model,
                     manufacturer="TP-Link",
+                    model=model,
+                    protocol=self.protocol_name,
+                    entity_id=_entity_id(dev, ip),
+                    local_ip=ip,
+                    mac_address=mac or None,
                 )
             )
 
@@ -131,74 +124,76 @@ class KasaProtocol(IJarvisDeviceProtocol):
         return devices
 
     async def control(
-        self, device: DiscoveredDevice, action: str, params: dict[str, Any] | None = None
+        self,
+        ip: str,
+        action: str,
+        data: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> DeviceControlResult:
+        def fail(error: str, entity_id: str = ip) -> DeviceControlResult:
+            return DeviceControlResult(
+                success=False, entity_id=entity_id, action=action, error=error
+            )
+
         try:
             from kasa import Discover
         except ImportError:
-            return DeviceControlResult(
-                success=False,
-                message="python-kasa is not installed. Run: pip install python-kasa",
-            )
+            return fail("python-kasa is not installed. Run: pip install python-kasa")
 
-        params = params or {}
-        ip: str = device.ip or ""
+        data = data or {}
         if not ip:
-            return DeviceControlResult(success=False, message="No IP address for device")
+            return fail("No IP address for device")
 
         try:
             dev = await Discover.discover_single(ip)
             await dev.update()
         except Exception as e:
-            return DeviceControlResult(success=False, message=f"Failed to connect to {ip}: {e}")
+            return fail(f"Failed to connect to {ip}: {e}")
+
+        entity_id: str = _entity_id(dev, ip)
+        name: str = getattr(dev, "alias", "") or ip
+        ok = DeviceControlResult(success=True, entity_id=entity_id, action=action)
 
         try:
             if action == "turn_on":
                 await dev.turn_on()
                 await dev.update()
-                return DeviceControlResult(success=True, message=f"{device.name} turned on")
+                return ok
 
             elif action == "turn_off":
                 await dev.turn_off()
                 await dev.update()
-                return DeviceControlResult(success=True, message=f"{device.name} turned off")
+                return ok
 
             elif action == "toggle":
                 if dev.is_on:
                     await dev.turn_off()
-                    new_state = "off"
                 else:
                     await dev.turn_on()
-                    new_state = "on"
                 await dev.update()
-                return DeviceControlResult(success=True, message=f"{device.name} toggled {new_state}")
+                return ok
 
             elif action == "set_brightness":
-                brightness: int = int(params.get("brightness", 100))
+                brightness: int = int(data.get("brightness", 100))
                 brightness = max(0, min(100, brightness))
                 if hasattr(dev, "set_brightness"):
                     await dev.set_brightness(brightness)
                     await dev.update()
-                    return DeviceControlResult(
-                        success=True, message=f"{device.name} brightness set to {brightness}%"
-                    )
-                return DeviceControlResult(
-                    success=False, message=f"{device.name} does not support brightness"
-                )
+                    return ok
+                return fail(f"{name} does not support brightness", entity_id)
 
             else:
-                return DeviceControlResult(success=False, message=f"Unsupported action: {action}")
+                return fail(f"Unsupported action: {action}", entity_id)
 
         except Exception as e:
-            return DeviceControlResult(success=False, message=f"Control failed: {e}")
+            return fail(f"Control failed: {e}", entity_id)
 
-    async def get_state(self, device: DiscoveredDevice) -> dict[str, Any]:
+    async def get_state(self, ip: str, **kwargs: Any) -> dict[str, Any] | None:
         try:
             from kasa import Discover
         except ImportError:
             return {"error": "python-kasa is not installed"}
 
-        ip: str = device.ip or ""
         if not ip:
             return {"error": "No IP address for device"}
 
